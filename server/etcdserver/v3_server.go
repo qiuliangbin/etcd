@@ -121,6 +121,8 @@ func (s *EtcdServer) Range(ctx context.Context, r *pb.RangeRequest) (*pb.RangeRe
 	}(time.Now())
 
 	if !r.Serializable {
+		// 如果需要线性一致性读，执行 linearizableReadNotify
+		// 此处将会一直阻塞直到 apply index >= read index
 		err = s.linearizableReadNotify(ctx)
 		trace.Step("agreement among raft nodes before linearized reading")
 		if err != nil {
@@ -659,10 +661,11 @@ func (s *EtcdServer) doSerialize(ctx context.Context, chk func(*auth.AuthInfo) e
 func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.InternalRaftRequest) (*apply2.Result, error) {
 	ai := s.getAppliedIndex()
 	ci := s.getCommittedIndex()
+	// 如果apply和commit的raft log差距太大需要拒绝客户的请求
 	if ci > ai+maxGapBetweenApplyAndCommitIndex {
 		return nil, errors.ErrTooManyRequests
 	}
-
+	// 利用reqIDGen产生递增标号
 	r.Header = &pb.RequestHeader{
 		ID: s.reqIDGen.Next(),
 	}
@@ -692,12 +695,16 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 	if id == 0 {
 		id = r.Header.ID
 	}
+	// 这里将id注册到etcdsever结构体中的Wait中，等待Wait.Trigger(id, nil)
+	// 正常情况下当raft log被应用后会调用Wait.Trigger(id, nil)触发管道
 	ch := s.w.Register(id)
 
 	cctx, cancel := context.WithTimeout(ctx, s.Cfg.ReqTimeout())
 	defer cancel()
 
 	start := time.Now()
+	// s是EtcdServer, r是EtcdServer的成员变量raftNode, 进入raft协议相关的处理逻辑
+	// etcdserver将请求数据进行适当的封装处理之后，调用raft模块的Propose接口方法，由raft模块来处理写请求
 	err = s.r.Propose(cctx, data)
 	if err != nil {
 		proposalsFailed.Inc()
@@ -708,6 +715,7 @@ func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.In
 	defer proposalsPending.Dec()
 
 	select {
+	// Wait.Trigger(id, nil)管道被触发
 	case x := <-ch:
 		return x.(*apply2.Result), nil
 	case <-cctx.Done():
@@ -729,6 +737,7 @@ func (s *EtcdServer) linearizableReadLoop() {
 		select {
 		case <-leaderChangedNotifier:
 			continue
+		// 在client发起一次Linearizable Read的时候，会向readwaitc写入一个空的结构体作为信号
 		case <-s.readwaitc:
 		case <-s.stopping:
 			return
@@ -743,7 +752,7 @@ func (s *EtcdServer) linearizableReadLoop() {
 		nr := s.readNotifier
 		s.readNotifier = nextnr
 		s.readMu.Unlock()
-
+		// 准备读取当前节点的commit index
 		confirmedIndex, err := s.requestCurrentIndex(leaderChangedNotifier, requestId)
 		if isStopped(err) {
 			return
@@ -759,7 +768,7 @@ func (s *EtcdServer) linearizableReadLoop() {
 
 		appliedIndex := s.getAppliedIndex()
 		trace.AddField(traceutil.Field{Key: "appliedIndex", Value: strconv.FormatUint(appliedIndex, 10)})
-
+		// 等待 apply index >= read index
 		if appliedIndex < confirmedIndex {
 			select {
 			case <-s.applyWait.Wait(confirmedIndex):

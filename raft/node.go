@@ -300,6 +300,7 @@ func (n *node) Stop() {
 	<-n.done
 }
 
+// run raft协议协程入口函数,就是EventLoop, 循环处理各个channel的事件,从而进行状态跳转
 func (n *node) run() {
 	var propc chan msgWithResult
 	var readyc chan Ready
@@ -311,6 +312,8 @@ func (n *node) run() {
 	lead := None
 
 	for {
+		// readyc 和 advance 只有一个是有效值
+		// 如果advancec是nil，说明刚commit了，可以创建ready channel来继续去把ready commit的commit了
 		if advancec != nil {
 			readyc = nil
 		} else if n.rn.HasReady() {
@@ -345,9 +348,11 @@ func (n *node) run() {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
+		// EtcdServer会往channel propc里面被塞入了Propose消息类型的数据; run()中从channel propc中读取Propose消息,并进行处理.
 		case pm := <-propc:
 			m := pm.m
 			m.From = r.id
+			// 处理从channel propc中读取Propose消息
 			err := r.Step(m)
 			if pm.result != nil {
 				pm.result <- err
@@ -423,6 +428,7 @@ func (n *node) Tick() {
 func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Message{Type: pb.MsgHup}) }
 
 func (n *node) Propose(ctx context.Context, data []byte) error {
+	// 消息类型为Propose
 	return n.stepWait(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 }
 
@@ -462,6 +468,7 @@ func (n *node) stepWait(ctx context.Context, m pb.Message) error {
 // Step advances the state machine using msgs. The ctx.Err() will be returned,
 // if any.
 func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) error {
+	// 消息类型不为Propose,则把传进来的pb.Message赋值给channel n.recvc
 	if m.Type != pb.MsgProp {
 		select {
 		case n.recvc <- m:
@@ -472,6 +479,8 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 			return ErrStopped
 		}
 	}
+	// Propose消息类型包括: type RaftKV interface下的所有接口
+	// 消息类型为Propose,则把传进来的pb.Message赋值给channel n.propc
 	ch := n.propc
 	pm := msgWithResult{m: m}
 	if wait {
@@ -488,6 +497,7 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 		return ErrStopped
 	}
 	select {
+	// 阻塞等待raft的处理结果
 	case err := <-pm.result:
 		if err != nil {
 			return err

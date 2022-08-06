@@ -134,6 +134,7 @@ func (sctx *serveCtx) serve(
 			sctx.serviceRegister(gs)
 		}
 		grpcl := m.Match(cmux.HTTP2())
+		// 启动处理客户端请求的grpc服务
 		go func() { errHandler(gs.Serve(grpcl)) }()
 
 		var gwmux *gw.ServeMux

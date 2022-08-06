@@ -844,6 +844,10 @@ func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected 
 	return r.prs.TallyVotes()
 }
 
+// Step raft协议中的核心函数, 负责状态机的跳转.
+// 	主要有2个逻辑:
+// 		1.根据传进来的term和本身的term的大小, 决定要做的动作, 具体的逻辑原理可见raft协议原理;
+// 		2.根据消息类型m.Type做不同的处理
 func (r *raft) Step(m pb.Message) error {
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
@@ -978,6 +982,8 @@ func (r *raft) Step(m pb.Message) error {
 		}
 
 	default:
+		// Propose消息类型走此道
+		// step()是一个类似函数借口的东西,根据节点的类型不同而调用不同的函数,比如leader节点该函数就是raft.stepLeader()
 		err := r.step(r, m)
 		if err != nil {
 			return err
@@ -1460,7 +1466,9 @@ func stepFollower(r *raft, m pb.Message) error {
 			r.logger.Infof("%x no leader at term %d; dropping index reading msg", r.id, r.Term)
 			return nil
 		}
+		// 目标为leader
 		m.To = r.lead
+		// 转发信息
 		r.send(m)
 	case pb.MsgReadIndexResp:
 		if len(m.Entries) != 1 {

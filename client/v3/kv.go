@@ -117,6 +117,7 @@ func (kv *kv) Put(ctx context.Context, key, val string, opts ...OpOption) (*PutR
 }
 
 func (kv *kv) Get(ctx context.Context, key string, opts ...OpOption) (*GetResponse, error) {
+	// 所有的客户端操作都将转换为 kv.Do()
 	r, err := kv.Do(ctx, OpGet(key, opts...))
 	return r.get, toErr(ctx, err)
 }
