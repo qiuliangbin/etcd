@@ -127,6 +127,7 @@ func (sctx *serveCtx) serve(
 	defer close(sctx.serversC)
 
 	if sctx.insecure {
+		// 启动etcd的grpc服务
 		gs = v3rpc.Server(s, nil, nil, gopts...)
 		v3electionpb.RegisterElectionServer(gs, servElection)
 		v3lockpb.RegisterLockServer(gs, servLock)

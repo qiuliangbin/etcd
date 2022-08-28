@@ -6585,6 +6585,7 @@ func (*UnimplementedKVServer) Compact(ctx context.Context, req *CompactionReques
 }
 
 func RegisterKVServer(s *grpc.Server, srv KVServer) {
+	// grpc服务注册,kv服务的配置信息为pb文件文件生成
 	s.RegisterService(&_KV_serviceDesc, srv)
 }
 

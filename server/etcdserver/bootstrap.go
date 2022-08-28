@@ -69,6 +69,7 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 	if terr := fileutil.TouchDirAll(cfg.Logger, cfg.MemberDir()); terr != nil {
 		return nil, fmt.Errorf("cannot access member directory: %v", terr)
 	}
+	// 配置snapshotter
 	ss := bootstrapSnapshot(cfg)
 	prt, err := rafthttp.NewRoundTripper(cfg.PeerTLSInfo, cfg.PeerDialTimeout())
 	if err != nil {
@@ -77,6 +78,7 @@ func bootstrap(cfg config.ServerConfig) (b *bootstrappedServer, err error) {
 
 	haveWAL := wal.Exist(cfg.WALDir())
 	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
+	// 创建backend.Backend
 	backend, err := bootstrapBackend(cfg, haveWAL, st, ss)
 	if err != nil {
 		return nil, err
@@ -198,6 +200,7 @@ func bootstrapSnapshot(cfg config.ServerConfig) *snap.Snapshotter {
 			zap.Error(err),
 		)
 	}
+	// 创建snapshotter
 	return snap.New(cfg.Logger, cfg.SnapDir())
 }
 
@@ -205,6 +208,7 @@ func bootstrapBackend(cfg config.ServerConfig, haveWAL bool, st v2store.Store, s
 	beExist := fileutil.Exist(cfg.BackendPath())
 	ci := cindex.NewConsistentIndex(nil)
 	beHooks := serverstorage.NewBackendHooks(cfg.Logger, ci)
+	// 创建backend.Backend
 	be := serverstorage.OpenBackend(cfg, beHooks)
 	defer func() {
 		if err != nil && be != nil {

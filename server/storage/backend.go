@@ -73,6 +73,7 @@ func OpenBackend(cfg config.ServerConfig, hooks backend.Hooks) backend.Backend {
 
 	now, beOpened := time.Now(), make(chan backend.Backend)
 	go func() {
+		// 新routinue 做超时控制
 		beOpened <- newBackend(cfg, hooks)
 	}()
 

@@ -382,23 +382,35 @@ func (m *Snapshot) XXX_DiscardUnknown() {
 var xxx_messageInfo_Snapshot proto.InternalMessageInfo
 
 type Message struct {
+	// 心跳,追加日志,投票,上层应用消息等多个消息类型
 	Type MessageType `protobuf:"varint,1,opt,name=type,enum=raftpb.MessageType" json:"type"`
-	To   uint64      `protobuf:"varint,2,opt,name=to" json:"to"`
-	From uint64      `protobuf:"varint,3,opt,name=from" json:"from"`
-	Term uint64      `protobuf:"varint,4,opt,name=term" json:"term"`
+	// 接收者
+	To uint64 `protobuf:"varint,2,opt,name=to" json:"to"`
+	// 发送者
+	From uint64 `protobuf:"varint,3,opt,name=from" json:"from"`
+	// 任期 逻辑时钟
+	Term uint64 `protobuf:"varint,4,opt,name=term" json:"term"`
 	// logTerm is generally used for appending Raft logs to followers. For example,
 	// (type=MsgApp,index=100,logTerm=5) means leader appends entries starting at
 	// index=101, and the term of entry at index 100 is 5.
 	// (type=MsgAppResp,reject=true,index=100,logTerm=5) means follower rejects some
 	// entries from its leader as it already has an entry with term 5 at index 100.
-	LogTerm    uint64   `protobuf:"varint,5,opt,name=logTerm" json:"logTerm"`
-	Index      uint64   `protobuf:"varint,6,opt,name=index" json:"index"`
-	Entries    []Entry  `protobuf:"bytes,7,rep,name=entries" json:"entries"`
-	Commit     uint64   `protobuf:"varint,8,opt,name=commit" json:"commit"`
-	Snapshot   Snapshot `protobuf:"bytes,9,opt,name=snapshot" json:"snapshot"`
-	Reject     bool     `protobuf:"varint,10,opt,name=reject" json:"reject"`
-	RejectHint uint64   `protobuf:"varint,11,opt,name=rejectHint" json:"rejectHint"`
-	Context    []byte   `protobuf:"bytes,12,opt,name=context" json:"context,omitempty"`
+	// 发送最后一条日志的任期号
+	LogTerm uint64 `protobuf:"varint,5,opt,name=logTerm" json:"logTerm"`
+	// 如果时投票请求时,其表示发送者最后一条日志的索引号
+	Index uint64 `protobuf:"varint,6,opt,name=index" json:"index"`
+	// 待存储的日志
+	Entries []Entry `protobuf:"bytes,7,rep,name=entries" json:"entries"`
+	// 已提交的所有日志
+	Commit uint64 `protobuf:"varint,8,opt,name=commit" json:"commit"`
+	// 存放快照
+	Snapshot Snapshot `protobuf:"bytes,9,opt,name=snapshot" json:"snapshot"`
+	// 对方节点拒绝了 当前的请求
+	Reject bool `protobuf:"varint,10,opt,name=reject" json:"reject"`
+	// 对方节点拒绝了当前的请求
+	RejectHint uint64 `protobuf:"varint,11,opt,name=rejectHint" json:"rejectHint"`
+	// 上下文信息 用于跟踪
+	Context []byte `protobuf:"bytes,12,opt,name=context" json:"context,omitempty"`
 }
 
 func (m *Message) Reset()         { *m = Message{} }

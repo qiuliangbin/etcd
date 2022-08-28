@@ -179,7 +179,7 @@ func newBackend(bcfg BackendConfig) *backend {
 	bopts.NoSync = bcfg.UnsafeNoFsync
 	bopts.NoGrowSync = bcfg.UnsafeNoFsync
 	bopts.Mlock = bcfg.Mlock
-
+	//
 	db, err := bolt.Open(bcfg.Path, 0600, bopts)
 	if err != nil {
 		bcfg.Logger.Panic("failed to open database", zap.String("path", bcfg.Path), zap.Error(err))

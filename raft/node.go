@@ -487,6 +487,7 @@ func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) 
 		pm.result = make(chan error, 1)
 	}
 	select {
+	// 如果为Propose消息,将Propose消息塞入propc通道
 	case ch <- pm:
 		if !wait {
 			return nil
