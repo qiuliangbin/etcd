@@ -408,9 +408,9 @@ type Message struct {
 	// 对方节点拒绝了 当前的请求
 	// 主要用于响应类型的消息，表示是否拒绝收到的消息
 	Reject bool `protobuf:"varint,10,opt,name=reject" json:"reject"`
-	// Follower 节点拒绝 Leader 节点的消息之后，会在该字段记录 一个Entry索引值供Leader节点。
+	// Follower 节点拒绝 Leader 节点的消息之后，会在该字段记录 一个Entry索引值供Leader节点
 	RejectHint uint64 `protobuf:"varint,11,opt,name=rejectHint" json:"rejectHint"`
-	// 上下文信息 用于跟踪
+	// 消息携带的一些上下文信息。例如，该消息是否与 Leader 节点转移相关
 	Context []byte `protobuf:"bytes,12,opt,name=context" json:"context,omitempty"`
 }
 

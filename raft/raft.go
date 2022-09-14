@@ -115,6 +115,7 @@ func (st StateType) String() string {
 // Config contains the parameters to start a raft.
 type Config struct {
 	// ID is the identity of the local raft. ID cannot be 0.
+	// 当前raft节点ID
 	ID uint64
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
@@ -241,32 +242,36 @@ func (c *Config) validate() error {
 }
 
 type raft struct {
+	// 当前节点在集群中的ID
 	id uint64
-
+	// 当前任期号
 	Term uint64
+	// 当前任期中当前节点将选票投给了哪个节点
 	Vote uint64
-
+	// 与只读请求相关
 	readStates []ReadState
 
-	// the log
+	// 每个节点的本地日志log
 	raftLog *raftLog
-
-	maxMsgSize         uint64
+	// 单条消息的最大字节数
+	maxMsgSize uint64
+	// 未提交Entry记录的最大值
 	maxUncommittedSize uint64
 	// TODO(tbg): rename to trk.
 	prs tracker.ProgressTracker
-
+	// 	当前节点在集群中的角色; Follower(跟随者), Candidate(候选者), Leader(领导者), PreCandidate(准备候选者),
 	state StateType
 
 	// isLearner is true if the local raft node is a learner.
-	isLearner bool
+	isLearner bool // 注：https://www.modb.pro/db/365678
+	// 缓存了当前节点等待发送的消息
+	msgs []pb.Message // 要发给其他节点的信息都存在这里，以后由上层channel取走
 
-	msgs []pb.Message
-
-	// the leader id
+	// 当前集群中 Leader 节点的ID
 	lead uint64
 	// leadTransferee is id of the leader transfer target when its value is not zero.
 	// Follow the procedure defined in raft thesis 3.10.
+	// 用于集群中 Leader 节点的转移， leadTransferee 记录了此次 Leader 角色转移的目标节点的 ID
 	leadTransferee uint64
 	// Only one conf change may be pending (in the log, but not yet
 	// applied) at a time. This is enforced via pendingConfIndex, which
@@ -278,32 +283,49 @@ type raft struct {
 	// an estimate of the size of the uncommitted tail of the Raft log. Used to
 	// prevent unbounded log growth. Only maintained by the leader. Reset on
 	// term changes.
+	// 未提交的最大长度
 	uncommittedSize uint64
-
+	// 与只读请求相关
 	readOnly *readOnly
 
 	// number of ticks since it reached last electionTimeout when it is leader
 	// or candidate.
 	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
+	// 选举计时器的指针，其单位是逻辑时钟的刻度，逻辑时钟每推进一次，该字段值就会增加 1
 	electionElapsed int
 
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
+	// 心跳计时器的指针，其单位也是逻辑时钟的刻度，逻辑时钟每推进一次，该字段值就会增加 1
 	heartbeatElapsed int
-
+	// 用来防止网络分区产生的多主问题;
+	// 如果一个follower在checkQuorum =true，并且已经有一个主了，并且自己并没有产生选举超时，
+	// 那么这时候如果有别的节点给我发心跳包，我是直接忽视的
 	checkQuorum bool
-	preVote     bool
-
+	// 打开pre-vote,主要是解决Candidate的网络分区问题,防止任期无限增加
+	// 注: preCandidate是在真正参与选举之前，参选者会向集群中的所有结点先发送一条语句：我要选举啦，你们听到了吗？
+	// 如果这时候有半数以上节点回应，则该节点就成为Candidate，否则变回follower
+	// https://zhuanlan.zhihu.com/p/451436454
+	preVote bool
+	// 心跳计时器的指针，其单位也是逻辑时钟的刻度，逻辑时钟每推进一次，该字段值就会增加 1
 	heartbeatTimeout int
-	electionTimeout  int
+	// 选举超时时间，当 electionElapsed 宇段值到达该值时， 就会触发新一轮的选举。
+	electionTimeout int
 	// randomizedElectionTimeout is a random number between
 	// [electiontimeout, 2 * electiontimeout - 1]. It gets reset
 	// when raft changes its state to follower or candidate.
+	//  electiontimeout～2 × electiontimeout-1 之间的随机值，也是选举计时器的上限，当 electionElapsed 超过该值时即为超时。
 	randomizedElectionTimeout int
 	disableProposalForwarding bool
-
+	// 当前节点推进逻辑时钟的函数。
+	// 如果当前节点是 Leader, 则指向raft.tickH由此 beat() 函数;
+	// 如果当前节点是 Follower 或是 Candidate, 则指向 raft.tickElection() 函数
 	tick func()
+	// 当前节点收到消息时的处理函数。
+	// 如果是 Leader 节点， 则该字段指向 stepLeader() 函数，
+	// 如果是 Follower 节点，则该字段指向 stepFollower() 函数，
+	// 如果是处于 preVote 阶段的节点或是 Candidate 节点, 则该字段指向 stepCandidate() 函数
 	step stepFunc
 
 	logger Logger
