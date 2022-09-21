@@ -611,17 +611,21 @@ func (r *raft) maybeCommit() bool {
 
 func (r *raft) reset(term uint64) {
 	if r.Term != term {
+		// 重置Term
 		r.Term = term
+		// 重置Vote
 		r.Vote = None
 	}
+	// 清空Lead字段
 	r.lead = None
-
+	// 重置选举计时器和心跳计时器
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
+	// 重置选举计时器的过期时间
 	r.resetRandomizedElectionTimeout()
-
+	// 清空leadTransferee
 	r.abortLeaderTransfer()
-
+	// 重置prs,其中每个Progress中的Next设置为raftLog.lastIndex()+1
 	r.prs.ResetVotes()
 	r.prs.Visit(func(id uint64, pr *tracker.Progress) {
 		*pr = tracker.Progress{
@@ -631,12 +635,14 @@ func (r *raft) reset(term uint64) {
 			IsLearner: pr.IsLearner,
 		}
 		if id == r.id {
+			// 将当前节点对应的prs.Match设置成lastIndex()
 			pr.Match = r.raftLog.lastIndex()
 		}
 	})
 
 	r.pendingConfIndex = 0
 	r.uncommittedSize = 0
+	// 只读请求的相关设置
 	r.readOnly = newReadOnly(r.readOnly.option)
 }
 
@@ -665,10 +671,14 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
+	// 递增electionElapsed选举计时器
 	r.electionElapsed++
-
-	if r.promotable() && r.pastElectionTimeout() {
+	// promotable 检查节点状态是否正常
+	// pastElectionTimeout 检查选举计时器是否超时
+	if r.promotable() && r.pastElectionTimeout() { //符合重新选举的条件
+		// 重置选举计时器
 		r.electionElapsed = 0
+		// 发起选举~~~
 		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgHup}); err != nil {
 			r.logger.Debugf("error occurred during election: %v", err)
 		}
@@ -706,35 +716,49 @@ func (r *raft) tickHeartbeat() {
 }
 
 func (r *raft) becomeFollower(term uint64, lead uint64) {
+	// 将step字段设置成stepFollower,stepFollower()函数中封装了Follower节点处理消息的行为
 	r.step = stepFollower
+	// 重置raft实例Term、Vote等字段
 	r.reset(term)
+	// 将tick字段设置成tickElection函数
 	r.tick = r.tickElection
+	// 设置当前集群的Leader节点
 	r.lead = lead
+	// 设置当前节点的角色
 	r.state = StateFollower
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
 }
 
+// becomeCandidate 当节点可以连接到集群中半数以上的节点时,会调用becomeCandidate()方法
+// 切换到Candidate状态
 func (r *raft) becomeCandidate() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
+	// 检测当前节点的状态,禁止直接从Leader状态切换到Candidate状态
 	if r.state == StateLeader {
 		panic("invalid transition [leader -> candidate]")
 	}
+	// 将step字段设置成stepCandidate,stepCandidate()函数中封装了Candidate节点处理消息的行为
 	r.step = stepCandidate
+	// 重置raft实例Term、Vote等字段,任期Term+1
 	r.reset(r.Term + 1)
 	r.tick = r.tickElection
+	// 投票给自己
 	r.Vote = r.id
+	// 修改当前节点的角色为Candidate(候选者)
 	r.state = StateCandidate
 	r.logger.Infof("%x became candidate at term %d", r.id, r.Term)
 }
 
 func (r *raft) becomePreCandidate() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
+	// 检查当前的节点的状态,禁止直接从Leader状态切换到PreCandidate
 	if r.state == StateLeader {
 		panic("invalid transition [leader -> pre-candidate]")
 	}
 	// Becoming a pre-candidate changes our step functions and state,
 	// but doesn't change anything else. In particular it does not increase
 	// r.Term or change r.Vote.
+	// 将step字段设置成stepCandidate,stepCandidate()函数中封装了PreCandidate节点处理消息的行为
 	r.step = stepCandidate
 	r.prs.ResetVotes()
 	r.tick = r.tickElection
@@ -743,15 +767,23 @@ func (r *raft) becomePreCandidate() {
 	r.logger.Infof("%x became pre-candidate at term %d", r.id, r.Term)
 }
 
+// becomeLeader 当Candidate节点得到集群中半数以上节点的选票时,
+// 会调用becomeLeader()方法切换成Leader状态
 func (r *raft) becomeLeader() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
+	// 检查当前节点的状态, 禁止直接从Follower转换成Leader状态
 	if r.state == StateFollower {
 		panic("invalid transition [follower -> leader]")
 	}
+	// 将step字段设置成stepLeader,stepLeader()函数中封装了Leader节点处理消息的行为
 	r.step = stepLeader
+	// 重置raft实例Term/Vote等字段
 	r.reset(r.Term)
+	// 将tick字段设置成tickHeartbeat函数
 	r.tick = r.tickHeartbeat
+	// lead字段设置成当前节点id
 	r.lead = r.id
+	// 更新当前节点的角色为Leader
 	r.state = StateLeader
 	// Followers enter replicate mode when they've been successfully probed
 	// (perhaps after having received a snapshot as a result). The leader is
@@ -765,7 +797,7 @@ func (r *raft) becomeLeader() {
 	// pending log entries, and scanning the entire tail of the log
 	// could be expensive.
 	r.pendingConfIndex = r.raftLog.lastIndex()
-
+	// 向当前节点的raftLog中追加一条空的Entry记录
 	emptyEnt := pb.Entry{Data: nil}
 	if !r.appendEntry(emptyEnt) {
 		// This won't happen because we just called reset() above.
@@ -775,6 +807,7 @@ func (r *raft) becomeLeader() {
 	// uncommitted log quota. This is because we want to preserve the
 	// behavior of allowing one entry larger than quota if the current
 	// usage is zero.
+	// 提交未提交的日志(上一个Leader，已经复制到多数节点,而未提交的日志；通过发个空包进行提交)
 	r.reduceUncommittedSize([]pb.Entry{emptyEnt})
 	r.logger.Infof("%x became leader at term %d", r.id, r.Term)
 }
@@ -1647,6 +1680,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 // which is true when its own id is in progress list.
 func (r *raft) promotable() bool {
 	pr := r.prs.Progress[r.id]
+	// 节点没有从集群中移除, 不是Leader, 没有待应用的snapshot
 	return pr != nil && !pr.IsLearner && !r.raftLog.hasPendingSnapshot()
 }
 
