@@ -383,11 +383,15 @@ func (r *raft) hardState() pb.HardState {
 
 // send schedules persisting state to a stable storage and AFTER that
 // sending the message (as part of next Ready message processing).
+// send 方法在消息发送之前对不同类型的消息进行合法性校验，然后将待发送的消息追加到raft.msg字段中
 func (r *raft) send(m pb.Message) {
+	// 设置消息的发送节点ID,
 	if m.From == None {
+		// 设置为当前节点
 		m.From = r.id
 	}
 	if m.Type == pb.MsgVote || m.Type == pb.MsgVoteResp || m.Type == pb.MsgPreVote || m.Type == pb.MsgPreVoteResp {
+		// 对MsgVote,MsgVoteResp,MsgPreVote,MsgPreVoteResp消息的Term字段进行检查(满足m.Term != 0，为非本地消息)
 		if m.Term == 0 {
 			// All {pre-,}campaign messages need to have the term set when
 			// sending.
@@ -404,6 +408,7 @@ func (r *raft) send(m pb.Message) {
 			panic(fmt.Sprintf("term should be set when sending %s", m.Type))
 		}
 	} else {
+		// 除上述消息类型外,必须满足Term==0(本地消息)
 		if m.Term != 0 {
 			panic(fmt.Sprintf("term should not be set when sending %s (was %d)", m.Type, m.Term))
 		}
@@ -758,19 +763,23 @@ func (r *raft) becomeLeader() {
 }
 
 func (r *raft) hup(t CampaignType) {
+	// 只有非Leader状态的节点才会处理MsgHup消息
 	if r.state == StateLeader {
 		r.logger.Debugf("%x ignoring MsgHup because already leader", r.id)
 		return
 	}
 
+	// 掉线/Learner/读取快照
 	if !r.promotable() {
 		r.logger.Warningf("%x is unpromotable and can not campaign", r.id)
 		return
 	}
+	// 获取raftLog中已提交但未应用(即applied~committed)的Entry记录
 	ents, err := r.raftLog.slice(r.raftLog.applied+1, r.raftLog.committed+1, noLimit)
 	if err != nil {
 		r.logger.Panicf("unexpected error getting unapplied entries (%v)", err)
 	}
+	// 检测是否有未应用的EntryConfChange记录，如果有就放弃发起选举的机会
 	if n := numOfPendingConf(ents); n != 0 && r.raftLog.committed > r.raftLog.applied {
 		r.logger.Warningf("%x cannot campaign at term %d since there are still %d pending configuration changes to apply", r.id, r.Term, n)
 		return
@@ -782,27 +791,36 @@ func (r *raft) hup(t CampaignType) {
 
 // campaign transitions the raft instance to candidate state. This must only be
 // called after verifying that this is a legitimate transition.
+// campaign 除了完成状态切换，还会向集群中的其他节点发送相应类型的消息；
+// 例如: 如果当前Follower节点要切换成PreCandidate状态,则会发送MsgPreVote消息
 func (r *raft) campaign(t CampaignType) {
 	if !r.promotable() {
 		// This path should not be hit (callers are supposed to check), but
 		// better safe than sorry.
 		r.logger.Warningf("%x is unpromotable; campaign() should have been called", r.id)
 	}
+	// 消息的Term值和类型
 	var term uint64
 	var voteMsg pb.MessageType
-	if t == campaignPreElection {
+	if t == campaignPreElection { // 切换的目标是PreCandidate
+		// 将当前节点切换成PreCandidate状态
 		r.becomePreCandidate()
-		voteMsg = pb.MsgPreVote
+		voteMsg = pb.MsgPreVote // 确定最后发出去的消息是MsgPreVote类型
 		// PreVote RPCs are sent for the next term before we've incremented r.Term.
+		// 确定最后发送消息的Term值,
+		// 注意: 这里只是增加了消息的Term值，并未增加raft.Term字段的值
 		term = r.Term + 1
-	} else {
+	} else { // 切换目标状态是Candidate
+		// 将当前节点切换成Candidate状态,需要读者回顾的是,becomeCandidate方法中会增加raft.Term字段的值,并将当前节点的选票投给自己
 		r.becomeCandidate()
-		voteMsg = pb.MsgVote
-		term = r.Term
+		voteMsg = pb.MsgVote // 确定最后发出去的消息是MsgVote类型
+		term = r.Term        // 确定最后发送消息的Term值
 	}
+	// 统计当前节点收到的选票,并统计其得票数是否超过半数,这次检测主要是为单节点设置的
 	if _, _, res := r.poll(r.id, voteRespMsgType(voteMsg), true); res == quorum.VoteWon {
 		// We won the election after voting for ourselves (which must mean that
 		// this is a single-node cluster). Advance to the next state.
+		// 当得到足够的选票时，则将PreCandidate状态的节点切换成Candidate状态，Candidate状态的节点则切换成Leader状态
 		if t == campaignPreElection {
 			r.campaign(campaignElection)
 		} else {
@@ -810,6 +828,7 @@ func (r *raft) campaign(t CampaignType) {
 		}
 		return
 	}
+	// 排序
 	var ids []uint64
 	{
 		idMap := r.prs.Voters.IDs()
@@ -819,17 +838,21 @@ func (r *raft) campaign(t CampaignType) {
 		}
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	}
+	// 状态切换完成之后，当前节点会向集群中所有节点发送指定类型的消息
 	for _, id := range ids {
 		if id == r.id {
+			// 跳过当前节点自身
 			continue
 		}
 		r.logger.Infof("%x [logterm: %d, index: %d] sent %s request to %x at term %d",
 			r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), voteMsg, id, r.Term)
 
 		var ctx []byte
+		// 在进行Leader节点转移时，MsgPreVote或MsgVote消息会在Context字段中设置该特殊值
 		if t == campaignTransfer {
 			ctx = []byte(t)
 		}
+		// 发送指定类型的消息，其中Index和LogTerm分别时当前节点的raftLog中最后一条消息的Index和Term值
 		r.send(pb.Message{Term: term, To: id, Type: voteMsg, Index: r.raftLog.lastIndex(), LogTerm: r.raftLog.lastTerm(), Context: ctx})
 	}
 }
@@ -983,7 +1006,7 @@ func (r *raft) Step(m pb.Message) error {
 
 	default:
 		// Propose消息类型走此道
-		// step()是一个类似函数借口的东西,根据节点的类型不同而调用不同的函数,比如leader节点该函数就是raft.stepLeader()
+		// step()是一个类似函数接口的东西,根据节点的类型不同而调用不同的函数,比如leader节点该函数就是raft.stepLeader()
 		err := r.step(r, m)
 		if err != nil {
 			return err
@@ -1110,9 +1133,10 @@ func stepLeader(r *raft, m pb.Message) error {
 	}
 	switch m.Type {
 	case pb.MsgAppResp:
+		// 更新对应Progress实例的RecentActive，从Leader节点的角度来看，MsgAppResp消息的发送节点还是存活的
 		pr.RecentActive = true
 
-		if m.Reject {
+		if m.Reject { // MssApp消息被拒绝
 			// RejectHint is the suggested next base entry for appending (i.e.
 			// we try to append entry RejectHint+1 next), and LogTerm is the
 			// term that the follower has at index RejectHint. Older versions
@@ -1135,6 +1159,7 @@ func stepLeader(r *raft, m pb.Message) error {
 			// described below.
 			r.logger.Debugf("%x received MsgAppResp(rejected, hint: (index %d, term %d)) from %x for index %d",
 				r.id, m.RejectHint, m.LogTerm, m.From, m.Index)
+			// Follower拒绝后，会返回MsgAppResp中携带RejectHint为Follower的raftLog最后一条记录的索引
 			nextProbeIdx := m.RejectHint
 			if m.LogTerm > 0 {
 				// If the follower has an uncommitted log tail, we would end up
@@ -1437,8 +1462,9 @@ func stepFollower(r *raft, m pb.Message) error {
 		m.To = r.lead
 		r.send(m)
 	case pb.MsgApp:
-		r.electionElapsed = 0
-		r.lead = m.From
+		r.electionElapsed = 0 // 重置选举计时器,防止当前Follower发起信仰新一轮选举
+		r.lead = m.From       // 设置raft.Lead记录，保存当前集群的Leader节点ID
+		// 将MsgApp消息中携带的Entry记录追加到raftLog中，并向Leader节点发送MsgAppResp消息，响应此次MsgApp消息
 		r.handleAppendEntries(m)
 	case pb.MsgHeartbeat:
 		r.electionElapsed = 0
@@ -1481,14 +1507,22 @@ func stepFollower(r *raft, m pb.Message) error {
 }
 
 func (r *raft) handleAppendEntries(m pb.Message) {
+	// m.Index表示Leader发送给Follower的上一条日志的索引位置。
+	// 如果Follower节点在Index位置的Entry记录已经提交过了,则不能进行追加操作,
+	// 在前面在raft协议时提到过,已提交的日志不能覆盖,
+	// 所以Follower节点会将其committed位置通过MsgAppResp消息(Index字段)通知Leader节点
 	if m.Index < r.raftLog.committed {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})
 		return
 	}
-
+	// 尝试将消息携带的Entry记录追加到raftLog中
 	if mlastIndex, ok := r.raftLog.maybeAppend(m.Index, m.LogTerm, m.Commit, m.Entries...); ok {
+		// 如果追加成功,则将最后一条记录的索引值通过MsgAppResp消息返回给Leader节点,
+		// 这样Leader节点就可以根据此值更新其对应的Next和Match值
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
 	} else {
+		// 如果追加失败，则将失败信息返回给Leader节点(即MsgAppResp消息的Reject字段为true),
+		// 同时返回的还有一些提示信息(RejectHint字段保存了当前节点raftLog中最后一条记录的索引)
 		r.logger.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",
 			r.id, r.raftLog.zeroTermOnErrCompacted(r.raftLog.term(m.Index)), m.Index, m.LogTerm, m.Index, m.From)
 
@@ -1508,12 +1542,12 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 			panic(fmt.Sprintf("term(%d) must be valid, but got %v", hintIndex, err))
 		}
 		r.send(pb.Message{
-			To:         m.From,
-			Type:       pb.MsgAppResp,
-			Index:      m.Index,
-			Reject:     true,
-			RejectHint: hintIndex,
-			LogTerm:    hintTerm,
+			To:         m.From,        // 消息来源节点
+			Type:       pb.MsgAppResp, // 消息回复类型
+			Index:      m.Index,       // 消息索引
+			Reject:     true,          // 拒绝
+			RejectHint: hintIndex,     // 最后一条日志记录的索引
+			LogTerm:    hintTerm,      // 最后一条日志记录的任期
 		})
 	}
 }
@@ -1623,6 +1657,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 
 // promotable indicates whether state machine can be promoted to leader,
 // which is true when its own id is in progress list.
+// promotable 检测当前节点是否可以升级为Leader状态
 func (r *raft) promotable() bool {
 	pr := r.prs.Progress[r.id]
 	return pr != nil && !pr.IsLearner && !r.raftLog.hasPendingSnapshot()
