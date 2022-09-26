@@ -492,6 +492,7 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
+// sendHeartbeat 向指定节点发送消息
 func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 	// Attach the commit as min(to.matched, r.committed).
 	// When the leader sends out heartbeat message,
@@ -499,10 +500,11 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 	// or it might not have all the committed entries.
 	// The leader MUST NOT forward the follower's commit to
 	// an unmatched index.
+	// 由于集群中的节点不一定都收到全部已提交的Entry记录，所以心跳消息携带commit提交位置
 	commit := min(r.prs.Progress[to].Match, r.raftLog.committed)
 	m := pb.Message{
 		To:      to,
-		Type:    pb.MsgHeartbeat,
+		Type:    pb.MsgHeartbeat, // 消息类型为MsgHeartbeat
 		Commit:  commit,
 		Context: ctx,
 	}
@@ -522,7 +524,9 @@ func (r *raft) bcastAppend() {
 }
 
 // bcastHeartbeat sends RPC, without entries to all the peers.
+// bcastHeartbeat 广播发送心跳
 func (r *raft) bcastHeartbeat() {
+	// 如果readOnly中有只读消息，会在消息的上下文中携带readOnly中最后一条消息的消息ID，Follower节点收到后会在上下文中携带该消息ID响应
 	lastCtx := r.readOnly.lastPendingRequestCtx()
 	if len(lastCtx) == 0 {
 		r.bcastHeartbeatWithCtx(nil)
@@ -531,12 +535,14 @@ func (r *raft) bcastHeartbeat() {
 	}
 }
 
+// bcastHeartbeatWithCtx 遍历向集群中的其他节点发送心跳消息
 func (r *raft) bcastHeartbeatWithCtx(ctx []byte) {
+
 	r.prs.Visit(func(id uint64, _ *tracker.Progress) {
-		if id == r.id {
+		if id == r.id { //过滤当前节点
 			return
 		}
-		r.sendHeartbeat(id, ctx)
+		r.sendHeartbeat(id, ctx) // 向指定的节点发送MsgBeat消息
 	})
 }
 
@@ -654,29 +660,37 @@ func (r *raft) tickElection() {
 }
 
 // tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
+// tickHeartbeat 用于心跳未超时前，Leader会发送MsgBeat消息包用于探活
 func (r *raft) tickHeartbeat() {
+	// 递增心跳计时器
 	r.heartbeatElapsed++
+	// 递增选举计时器
 	r.electionElapsed++
-
+	// 选举超时
 	if r.electionElapsed >= r.electionTimeout {
-		r.electionElapsed = 0
-		if r.checkQuorum {
+		r.electionElapsed = 0 // 重置选举计时器，Leader节点不会主动发起选举
+		if r.checkQuorum {    // 进行多数检测
+			// 当选举计时器超过electionTimeout时，会触发一次checkQuorum操作,
+			// 该操作不会发送网络消息(虽然这里会通过raft.Step()方法处理消息)，
+			// 它只是检查当前节点是否与集群中的大部分节点连通
 			if err := r.Step(pb.Message{From: r.id, Type: pb.MsgCheckQuorum}); err != nil {
 				r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
 			}
 		}
 		// If current leader cannot transfer leadership in electionTimeout, it becomes leader again.
+		// 选举计时器处于 electionTimeout~randomizedElectionTimeout 时间段时，不能进行Leader节点的转移
 		if r.state == StateLeader && r.leadTransferee != None {
 			r.abortLeaderTransfer()
 		}
 	}
 
-	if r.state != StateLeader {
+	if r.state != StateLeader { // 检测当前是否为Leader节点
 		return
 	}
-
-	if r.heartbeatElapsed >= r.heartbeatTimeout {
-		r.heartbeatElapsed = 0
+	// 如果当前节点为Leader节点，检测是否心跳计时器是否超时
+	if r.heartbeatElapsed >= r.heartbeatTimeout { // 心跳计时器超时
+		r.heartbeatElapsed = 0 // 重置心跳计时器
+		// 发送MsgBeat消息
 		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgBeat}); err != nil {
 			r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
 		}
@@ -997,10 +1011,10 @@ type stepFunc func(r *raft, m pb.Message) error
 func stepLeader(r *raft, m pb.Message) error {
 	// These message types do not require any progress for m.From.
 	switch m.Type {
-	case pb.MsgBeat:
-		r.bcastHeartbeat()
+	case pb.MsgBeat: // MsgBeat消息处理
+		r.bcastHeartbeat() // 向所有节点广播心跳包(不携带任何其他数据)
 		return nil
-	case pb.MsgCheckQuorum:
+	case pb.MsgCheckQuorum: // MsgCheckQuorum消息处理
 		// The leader should always see itself as active. As a precaution, handle
 		// the case in which the leader isn't in the configuration any more (for
 		// example if it just removed itself).
@@ -1010,12 +1024,13 @@ func stepLeader(r *raft, m pb.Message) error {
 		if pr := r.prs.Progress[r.id]; pr != nil {
 			pr.RecentActive = true
 		}
+		// 检测当前Leader节点是否与集群中大部分节点连通，如果不连通，则切换成Follower状态
 		if !r.prs.QuorumActive() {
 			r.logger.Warningf("%x stepped down to follower since quorum is not active", r.id)
 			r.becomeFollower(r.Term, None)
 		}
-		// Mark everyone (but ourselves) as inactive in preparation for the next
-		// CheckQuorum.
+		// Mark everyone (but ourselves) as inactive in preparation for the next CheckQuorum.
+		// 将每个人（除了我们自己）标记为不活动以准备下一次 CheckQuorum
 		r.prs.Visit(func(id uint64, pr *tracker.Progress) {
 			if id != r.id {
 				pr.RecentActive = false
@@ -1288,21 +1303,24 @@ func stepLeader(r *raft, m pb.Message) error {
 			}
 		}
 	case pb.MsgHeartbeatResp:
-		pr.RecentActive = true
-		pr.ProbeSent = false
+		pr.RecentActive = true // 更新对应Progress.RecentActive，表示Follower节点与自己连通
+		pr.ProbeSent = false   // 重置Progress.Paused字段,表示可以继续向Follower节点发送消息
 
 		// free one slot for the full inflights window to allow progress.
 		if pr.State == tracker.StateReplicate && pr.Inflights.Full() {
-			pr.Inflights.FreeFirstOne()
+			pr.Inflights.FreeFirstOne() // 释放inflights中第一个消息, 这样就可以开始后续消息的发送
 		}
+		// 当Leader节点收到Follower节点的MsgHeartbeatResp之后,
+		// 会比较对应的Match值与Leader节点的raftLog,从而判断Follower节点是否已拥有了全部的Entry记录
+		// 如果该Follower缺少Entry，则Leader会发送缺少的Entry记录
 		if pr.Match < r.raftLog.lastIndex() {
-			r.sendAppend(m.From)
+			r.sendAppend(m.From) // 通过向指定节点发送MsgApp消息完成Entry记录的复制
 		}
-
+		// 如果该节点的只读模式不是ReadOnlySafe，则返回
 		if r.readOnly.option != ReadOnlySafe || len(m.Context) == 0 {
 			return nil
 		}
-
+		// 统计目前为止响应上述携带消息ID的MsgHeartbeat消息的节点个数，如果没有超过半数则退出
 		if r.prs.Voters.VoteResult(r.readOnly.recvAck(m.From, m.Context)) != quorum.VoteWon {
 			return nil
 		}
@@ -1440,9 +1458,11 @@ func stepFollower(r *raft, m pb.Message) error {
 		r.electionElapsed = 0
 		r.lead = m.From
 		r.handleAppendEntries(m)
-	case pb.MsgHeartbeat:
-		r.electionElapsed = 0
-		r.lead = m.From
+	case pb.MsgHeartbeat: // MsgHeartbeat消息处理
+		r.electionElapsed = 0 // 重置选举计时器，防止当前Follower节点发起新一轮选举
+		r.lead = m.From       // 设置Leader节点的ID
+		// 其中会修改raft.committed字段的值(放心，在Leader发送消息时，已经确定了当前Follower节点
+		// 有committed之前的全部日志记录)，然后发送MsgHeartbeatResp类型消息，响应此次心跳
 		r.handleHeartbeat(m)
 	case pb.MsgSnap:
 		r.electionElapsed = 0
@@ -1519,7 +1539,11 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 }
 
 func (r *raft) handleHeartbeat(m pb.Message) {
+	// 根据MsgHeartbeat消息的Commit字段，更新raftLog中记录的已提交位置;
+	// 注意,在Leader节点发送MsgHeartbeat消息时,
+	// 已经确认了当前Follower节点中raftLog.committed字段的合适位置
 	r.raftLog.commitTo(m.Commit)
+	// 发送MsgHeartbeatResp消息，响应心跳
 	r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context})
 }
 
