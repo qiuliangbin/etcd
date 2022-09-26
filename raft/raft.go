@@ -1037,25 +1037,30 @@ func stepLeader(r *raft, m pb.Message) error {
 			}
 		})
 		return nil
-	case pb.MsgProp:
+	case pb.MsgProp: // 客户端发往到集群的写请求是通过MsgProp消息表示的
+		// 检测MsgProp消息是否携带了Entry记录, 如果未携带,则输出异常日志并终止程序
 		if len(m.Entries) == 0 {
 			r.logger.Panicf("%x stepped empty MsgProp", r.id)
 		}
+		// 检测当前节点是否被移除集群, 如果当前节点以Leader状态被移除集群，则不再处理MsgProp消息
 		if r.prs.Progress[r.id] == nil {
 			// If we are not currently a member of the range (i.e. this node
 			// was removed from the configuration while serving as leader),
 			// drop any new proposals.
 			return ErrProposalDropped
 		}
+		// 检测当前是否正在进行Leader节点的转移,不再处理MsgProp消息
 		if r.leadTransferee != None {
 			r.logger.Debugf("%x [term %d] transfer leadership to %x is in progress; dropping proposal", r.id, r.Term, r.leadTransferee)
 			return ErrProposalDropped
 		}
-
+		// 遍历MsgProp消息携带的全部Entry记录
 		for i := range m.Entries {
 			e := &m.Entries[i]
+			// 参考链接: https://mrcroxx.github.io/posts/code-reading/etcdraft-made-simple/5-confchange/#32-%E6%8F%90%E8%AE%AEconfchange
 			var cc pb.ConfChangeI
-			if e.Type == pb.EntryConfChange {
+			// 反序列化ConfChange或者ConfChangeV2消息数据并对其进行一些预处理
+			if e.Type == pb.EntryConfChange { // 旧版本的配置变更消息ConfChange仅支持“one node a time”的简单算法
 				var ccc pb.ConfChange
 				if err := ccc.Unmarshal(e.Data); err != nil {
 					panic(err)
@@ -1069,31 +1074,42 @@ func stepLeader(r *raft, m pb.Message) error {
 				cc = ccc
 			}
 			if cc != nil {
+				// alreadyPending：上一次合法的ConfChange还没被应用时为真
 				alreadyPending := r.pendingConfIndex > r.raftLog.applied
+				// alreadyJoint：当前配置正处于joint configuration时为真。
 				alreadyJoint := len(r.prs.Config.Voters[1]) > 0
+				// wantsLeaveJoint：如果消息（旧格式的消息会转为V2处理）的Changes字段为空时，说明该消息为用于退出joint configuration而转到$C_{new}$的消息
 				wantsLeaveJoint := len(cc.AsV2().Changes) == 0
 
 				var refused string
 				if alreadyPending {
+					// Raft同一时间只能有一个未被提交的ConfChange，因此拒绝新提议
 					refused = fmt.Sprintf("possible unapplied conf change at index %d (applied to %d)", r.pendingConfIndex, r.raftLog.applied)
 				} else if alreadyJoint && !wantsLeaveJoint {
+					// 处于joint configuration的集群必须先退出joint configuration并转为$C_{new}，才能开始新的ConfChange，因此拒绝提议。
 					refused = "must transition out of joint config first"
 				} else if !alreadyJoint && wantsLeaveJoint {
+					// 未处于joint configuration，忽略不做任何变化空ConfChange消息
 					refused = "not in joint state; refusing empty conf change"
 				}
 
 				if refused != "" {
+					// 对需要拒绝的提议的处理非常简单，只需要将该日志条目替换为没有任何意义的普通空日志条目pb.Entry{Type: pb.EntryNormal}即可
 					r.logger.Infof("%x ignoring conf change %v at config %s: %s", r.id, cc, r.prs.Config, refused)
 					m.Entries[i] = pb.Entry{Type: pb.EntryNormal}
 				} else {
+					// 而对于合法的ConfChange，除了将其追加到日志中外，还需要修改raft结构体的pendingConfIndex字段，
+					// 将其置为$[上一条ConfChange.Index, 当前ConfChange.Index)$的值（这里置为了处理该MsgProp之前的最后一条日志的index），
+					// 以供之后遇到ConfChange消息时判断当前ConfChange是否已经被应用。
 					r.pendingConfIndex = r.raftLog.lastIndex() + uint64(i) + 1
 				}
 			}
 		}
-
+		// 将上述Entry记录追加到当前节点的raftLog中
 		if !r.appendEntry(m.Entries...) {
 			return ErrProposalDropped
 		}
+		// 通过MsgApp消息向集群中其他节点复制Entry记录
 		r.bcastAppend()
 		return nil
 	case pb.MsgReadIndex:
@@ -1126,7 +1142,6 @@ func stepLeader(r *raft, m pb.Message) error {
 	switch m.Type {
 	case pb.MsgAppResp:
 		pr.RecentActive = true
-
 		if m.Reject {
 			// RejectHint is the suggested next base entry for appending (i.e.
 			// we try to append entry RejectHint+1 next), and LogTerm is the
@@ -1445,14 +1460,16 @@ func stepCandidate(r *raft, m pb.Message) error {
 func stepFollower(r *raft, m pb.Message) error {
 	switch m.Type {
 	case pb.MsgProp:
-		if r.lead == None {
+		if r.lead == None { // 当前集群中没有Leader节点，则忽略该MsgProp消息
 			r.logger.Infof("%x no leader at term %d; dropping proposal", r.id, r.Term)
 			return ErrProposalDropped
-		} else if r.disableProposalForwarding {
+		} else if r.disableProposalForwarding { // Leader节点被移除出集群, 则返回ErrProposalDropped
 			r.logger.Infof("%x not forwarding to leader %x at term %d; dropping proposal", r.id, r.lead, r.Term)
 			return ErrProposalDropped
 		}
+		// 将消息的To字段设置为当前集群的Leader节点id
 		m.To = r.lead
+		// 将MsgProp消息转发给当前集群的Leader节点
 		r.send(m)
 	case pb.MsgApp:
 		r.electionElapsed = 0
