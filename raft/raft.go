@@ -1113,8 +1113,12 @@ func stepLeader(r *raft, m pb.Message) error {
 		r.bcastAppend()
 		return nil
 	case pb.MsgReadIndex:
+		// 当 Leader 节点收到客户端的只读请求时，会将当前请求的编号记录下来，
+		// 在返回数据给客户端之前，Leader节点需要先确定自己是否依然是当前集群的Leader节点(通过心跳的方式),
+		// 在确定其依然是Leader节点之后，就可以说明该节点可以响应该请求，只需要等待当前Leader节点的提交位置
+		// (即raftLog.committed)到达或是超过只读请求的编号即可向客户端返回响应。
 		// only one voting member (the leader) in the cluster
-		if r.prs.IsSingleton() {
+		if r.prs.IsSingleton() { // 单机情况，直接回复客户端
 			if resp := r.responseToReadIndexReq(m, r.raftLog.committed); resp.To != None {
 				r.send(resp)
 			}
@@ -1123,6 +1127,11 @@ func stepLeader(r *raft, m pb.Message) error {
 
 		// Postpone read only request when this leader has not committed
 		// any log entry at its term.
+		// 解决新leader当选时commit index落后的问题。如果leader在当前term还没提交过消息，则其会忽略该MsgReadIndex消息
+		// 实现ReadIndex时存在一个特殊情况。当新leader刚刚当选时，其commit index可能并不是此时集群的commit index。
+		// 因此，需要等到新leader至少提交了一条日志时，才能保证其commit index能反映集群此时的commit index。
+		// 幸运的是，新leader当选时为了提交非本term的日志，会提交一条空日志。
+		// 因此，leader只需要等待该日志提交就能开始提供ReadIndex服务，而无需再提交额外的空日志
 		if !r.committedEntryInCurrentTerm() {
 			r.pendingReadIndexMessages = append(r.pendingReadIndexMessages, m)
 			return nil
@@ -1339,9 +1348,10 @@ func stepLeader(r *raft, m pb.Message) error {
 		if r.prs.Voters.VoteResult(r.readOnly.recvAck(m.From, m.Context)) != quorum.VoteWon {
 			return nil
 		}
-
+		// 响应节点超过半数之后，会清空readOnly中指定消息ID及其之前的所有相关记录
 		rss := r.readOnly.advance(m)
 		for _, rs := range rss {
+			// 回复ReadIndexReq包请求
 			if resp := r.responseToReadIndexReq(rs.req, rs.index); resp.To != None {
 				r.send(resp)
 			}
@@ -1505,13 +1515,15 @@ func stepFollower(r *raft, m pb.Message) error {
 		}
 		// 目标为leader
 		m.To = r.lead
-		// 转发信息
+		// 将MsgReadIndex消息转发给当前集群的Leader节点
 		r.send(m)
 	case pb.MsgReadIndexResp:
-		if len(m.Entries) != 1 {
+		if len(m.Entries) != 1 { // 检测MsgReadIndexResp消息的合法性
 			r.logger.Errorf("%x invalid format of MsgReadIndexResp from %x, entries count: %d", r.id, m.From, len(m.Entries))
 			return nil
 		}
+		// 将MsgReadIndex消息对应的消息ID以及已提交位置(raftLog.committed)封装成ReadState实例,
+		// 并添加到raft.readStates中, 等待其他goroutine处理
 		r.readStates = append(r.readStates, ReadState{Index: m.Index, RequestCtx: m.Entries[0].Data})
 	}
 	return nil
@@ -1785,12 +1797,17 @@ func (r *raft) committedEntryInCurrentTerm() bool {
 // itself, a blank value will be returned.
 func (r *raft) responseToReadIndexReq(req pb.Message, readIndex uint64) pb.Message {
 	if req.From == None || req.From == r.id {
+		// 如采是客户端直接发送到 Leader 节点的消息,则将 MsgReadindex 消息对应的已提交往置
+		// 以及其消息 ID 封装成 ReadState 实例, 添加到 raft.readStates 中保存.
+		// 后续会有其他 goroutine 读取该数组，并对相应的 MsgReadindex 消息进行响应
 		r.readStates = append(r.readStates, ReadState{
 			Index:      readIndex,
 			RequestCtx: req.Entries[0].Data,
 		})
 		return pb.Message{}
 	}
+	// 如果是其他Follower节点转发到Leader节点的MsgReadIndex消息, 则Leader节点
+	// 会向Follower节点返回相应的MsgReadIndexResp消息, 并由Follower节点响应Client
 	return pb.Message{
 		Type:    pb.MsgReadIndexResp,
 		To:      req.From,
@@ -1880,11 +1897,22 @@ func sendMsgReadIndexResponse(r *raft, m pb.Message) {
 	switch r.readOnly.option {
 	// If more than the local vote is needed, go through a full broadcast.
 	case ReadOnlySafe:
+		// 当仅使用ReadIndex时，leader会将当前的commit index作为read index并通过readOnly的addRequest方法将其加入到待确认的队列中。
+		// 然后leader节点自己先确认该read index，然后广播心跳等待其它节点确认该read index。
+		// leader在主动请求确认read index时，发送的心跳消息携带的rctx就是该read index相应的rctx；
+		// 而当leader因heartbeat timeout超时而广播心跳消息时，携带的是待确认的最后一条read index相应的rctx，
+		// 以批量确认所有待确认的read index
+
+		// 记录当前节点的 raftLog.committed 字段值，即己提交的位置
 		r.readOnly.addRequest(r.raftLog.committed, m)
-		// The local node automatically acks the request.
+		// leader节点自己先确认该read index
 		r.readOnly.recvAck(r.id, m.Entries[0].Data)
+		// 广播心跳等待其它节点确认该read index
 		r.bcastHeartbeatWithCtx(m.Entries[0].Data)
 	case ReadOnlyLeaseBased:
+		// 当使用Lease Read时，leader可以直接返回相应的ReadState，因为etcd/raft的Lease Read是通过Check Quorum实现的。
+		// 即只要leader没有退位，说明其仍持有lease；
+		// 而当leader无法为lease续约时，Check Quorum机制会让leader退位为follower，其也就不会通过stepLeader方法处理MsgReadIndex请求
 		if resp := r.responseToReadIndexReq(m, r.raftLog.committed); resp.To != None {
 			r.send(resp)
 		}
