@@ -430,41 +430,44 @@ func (r *raft) sendAppend(to uint64) {
 // ("empty" messages are useful to convey updated Commit indexes, but
 // are undesirable when we're sending multiple messages in a batch).
 func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
+	// 判断是否可以向指定的Follower节点发送消息, 创建Message实例
 	pr := r.prs.Progress[to]
 	if pr.IsPaused() {
 		return false
 	}
 	m := pb.Message{}
 	m.To = to
-
-	term, errt := r.raftLog.term(pr.Next - 1)
-	ents, erre := r.raftLog.entries(pr.Next, r.maxMsgSize)
-	if len(ents) == 0 && !sendIfEmpty {
+	// 查找待发送的消息
+	term, errt := r.raftLog.term(pr.Next - 1)              // 拿到Peer Next-1位置在Leader raftLog中的任期
+	ents, erre := r.raftLog.entries(pr.Next, r.maxMsgSize) // 获取待发送的Entry记录,一次最多发maxMsgSize条
+	if len(ents) == 0 && !sendIfEmpty {                    // 合法性检测
 		return false
 	}
-
+	// 如果在上述raftLog的查找出现异常,说明Peer的复制进度太落后(例如:网络脑裂、Peer节点宕机等),则会尝试发送MsgSnap消息
 	if errt != nil || erre != nil { // send snapshot if we failed to get term or entries
-		if !pr.RecentActive {
+		if !pr.RecentActive { // 从当前集群的Leader节点的角度来看, 目标Follower节点已经不再存活
 			r.logger.Debugf("ignore sending snapshot to %x since it is not recently active", to)
 			return false
 		}
 
-		m.Type = pb.MsgSnap
-		snapshot, err := r.raftLog.snapshot()
+		m.Type = pb.MsgSnap                   // 1.设置MsgSnap消息的Type字段
+		snapshot, err := r.raftLog.snapshot() // 获取快照数据
 		if err != nil {
-			if err == ErrSnapshotTemporarilyUnavailable {
+			// 异常检测, 则终止整个程序
+			if err == ErrSnapshotTemporarilyUnavailable { // 快照文件被删除、移动或者损坏会触发异常
 				r.logger.Debugf("%x failed to send snapshot to %x because snapshot is temporarily unavailable", r.id, to)
 				return false
 			}
 			panic(err) // TODO(bdarnell)
 		}
-		if IsEmptySnap(snapshot) {
+		if IsEmptySnap(snapshot) { // 快照文件没内容也触发终止程序
 			panic("need non-empty snapshot")
 		}
-		m.Snapshot = snapshot
-		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term
+		m.Snapshot = snapshot                                            // 2.设置MsgSnap消息的Snapshot字段
+		sindex, sterm := snapshot.Metadata.Index, snapshot.Metadata.Term //获取快照的关键信息(任期和索引)
 		r.logger.Debugf("%x [firstindex: %d, commit: %d] sent snapshot[index: %d, term: %d] to %x [%s]",
 			r.id, r.raftLog.firstIndex(), r.raftLog.committed, sindex, sterm, to, pr)
+		// 将对应的Peer节点的状态设置成StateSnapshot, 其中会用Progress.PendingSnapshot字段记录快照数据的信息
 		pr.BecomeSnapshot(sindex)
 		r.logger.Debugf("%x paused sending replication messages to %x [%s]", r.id, to, pr)
 	} else {
@@ -487,6 +490,7 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 			}
 		}
 	}
+	// 发送组装好的上述消息
 	r.send(m)
 	return true
 }
@@ -1492,9 +1496,9 @@ func stepFollower(r *raft, m pb.Message) error {
 		// 有committed之前的全部日志记录)，然后发送MsgHeartbeatResp类型消息，响应此次心跳
 		r.handleHeartbeat(m)
 	case pb.MsgSnap:
-		r.electionElapsed = 0
-		r.lead = m.From
-		r.handleSnapshot(m)
+		r.electionElapsed = 0 // 重置raft.electionElapsed, 防止发生选举
+		r.lead = m.From       // 设置Leader的id
+		r.handleSnapshot(m)   // 通过MsgSnap消息中的快照书籍, 重建当前节点的raftLog
 	case pb.MsgTransferLeader:
 		if r.lead == None {
 			r.logger.Infof("%x no leader at term %d; dropping leader transfer msg", r.id, r.Term)
@@ -1577,14 +1581,17 @@ func (r *raft) handleHeartbeat(m pb.Message) {
 }
 
 func (r *raft) handleSnapshot(m pb.Message) {
+	// 获取快照数据的元数据
 	sindex, sterm := m.Snapshot.Metadata.Index, m.Snapshot.Metadata.Term
-	if r.restore(m.Snapshot) {
+	if r.restore(m.Snapshot) { // 返回值表示是否通过快照数据进行了重建raftLog
 		r.logger.Infof("%x [commit: %d] restored snapshot [index: %d, term: %d]",
 			r.id, r.raftLog.committed, sindex, sterm)
+		// 如果重建成功则返回MsgAppResp消息，Index为当前日志最新的索引值
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()})
 	} else {
 		r.logger.Infof("%x [commit: %d] ignored snapshot [index: %d, term: %d]",
 			r.id, r.raftLog.committed, sindex, sterm)
+		// 如果重建失败则返回MsgAppResp消息，Index为当前日志已提交位置
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})
 	}
 }
@@ -1593,6 +1600,7 @@ func (r *raft) handleSnapshot(m pb.Message) {
 // configuration of state machine. If this method returns false, the snapshot was
 // ignored, either because it was obsolete or because of an error.
 func (r *raft) restore(s pb.Snapshot) bool {
+	// 如果快照中的Index小于当前raftLog已提交位置则返回false, 记录都已经存在，则直接返回不需要加载snapshot消息
 	if s.Metadata.Index <= r.raftLog.committed {
 		return false
 	}
@@ -1614,7 +1622,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	// code here and there assumes that r.id is in the progress tracker.
 	found := false
 	cs := s.Metadata.ConfState
-
+	// 该节点是否存在于snapshot快照元数据中;不存在,则拒绝加载快照
 	for _, set := range [][]uint64{
 		cs.Voters,
 		cs.Learners,
@@ -1641,14 +1649,18 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	}
 
 	// Now go ahead and actually restore.
-
+	// 根据快照书籍的元数据查找匹配的Entry记录,如果存在,则表示当前节点已经拥有了该快照中的全部数据,
+	// 那么就无须进行后续的重建操作
 	if r.raftLog.matchTerm(s.Metadata.Index, s.Metadata.Term) {
 		r.logger.Infof("%x [commit: %d, lastindex: %d, lastterm: %d] fast-forwarded commit to snapshot [index: %d, term: %d]",
 			r.id, r.raftLog.committed, r.raftLog.lastIndex(), r.raftLog.lastTerm(), s.Metadata.Index, s.Metadata.Term)
+		// 快照中全部的Entry记录都已经提交了,所以尝试当前节点的raftLog.committed。
+		// 根据raft协议可知, raftLog.committed只增不减
 		r.raftLog.commitTo(s.Metadata.Index)
 		return false
 	}
-
+	// 通过层层校验,可以开始重建raftLog了
+	// 先将快照数据加载到raftLog.unstable中,同时重置相关字段
 	r.raftLog.restore(s)
 
 	// Reset the configuration and add the (potentially updated) peers in anew.
@@ -1665,7 +1677,7 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	}
 
 	assertConfStatesEquivalent(r.logger, cs, r.switchToConfig(cfg, prs))
-
+	// 更新当前节点自身的Match值
 	pr := r.prs.Progress[r.id]
 	pr.MaybeUpdate(pr.Next - 1) // TODO(tbg): this is untested and likely unneeded
 
