@@ -26,7 +26,7 @@ import (
 
 type kvServer struct {
 	hdr header
-	kv  etcdserver.RaftKV
+	kv  etcdserver.RaftKV // 调用的v3_server的实现接口
 	// maxTxnOps is the max operations per txn.
 	// e.g suppose maxTxnOps = 128.
 	// Txn.Success can have at most 128 operations,

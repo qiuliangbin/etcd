@@ -140,7 +140,7 @@ func (pr *Progress) BecomeReplicate() {
 // snapshot index.
 func (pr *Progress) BecomeSnapshot(snapshoti uint64) {
 	pr.ResetState(StateSnapshot)
-	pr.PendingSnapshot = snapshoti
+	pr.PendingSnapshot = snapshoti // 记录这个PendingSnapshot有什么用 ???
 }
 
 // MaybeUpdate is called when an MsgAppResp arrives from the follower, with the
