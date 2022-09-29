@@ -616,6 +616,7 @@ func (r *raft) advance(rd Ready) {
 // r.bcastAppend).
 func (r *raft) maybeCommit() bool {
 	mci := r.prs.Committed()
+	// 更新raftLog.committed字段，完成提交
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
 
@@ -657,7 +658,9 @@ func (r *raft) reset(term uint64) {
 }
 
 func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
+	// 获取raftLog中最后一条记录的索引值
 	li := r.raftLog.lastIndex()
+	// 更新待追加记录的Term值和索引值
 	for i := range es {
 		es[i].Term = r.Term
 		es[i].Index = li + 1 + uint64(i)
@@ -672,9 +675,12 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 		return false
 	}
 	// use latest "last" index after truncate/append
+	// 向raftLog中追加记录
 	li = r.raftLog.append(es...)
+	// 更新当前节点对应的Progress, 主要是更新Next和Match,用来标识对应节点的Entry记录复制的情况
 	r.prs.Progress[r.id].MaybeUpdate(li)
 	// Regardless of maybeCommit's return, our caller will call bcastAppend.
+	// 尝试提交Entry记录
 	r.maybeCommit()
 	return true
 }

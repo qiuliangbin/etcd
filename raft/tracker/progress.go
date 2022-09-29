@@ -148,11 +148,15 @@ func (pr *Progress) BecomeSnapshot(snapshoti uint64) {
 // an outdated message. Otherwise it updates the progress and returns true.
 func (pr *Progress) MaybeUpdate(n uint64) bool {
 	var updated bool
+	// n之前成功发送的所有Entry记录已经写入对应节点的raftLog中
 	if pr.Match < n {
 		pr.Match = n
 		updated = true
+		// Progress.ProbeSent设置为false,表示Leader节点可以继续向对应Follower节点
+		// 发送MsgApp消息(即复制Entry记录)
 		pr.ProbeAcked()
 	}
+	// 移动Next字段,下次要复制的Entry记录从Next开始
 	pr.Next = max(pr.Next, n+1)
 	return updated
 }
