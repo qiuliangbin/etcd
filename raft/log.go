@@ -21,26 +21,35 @@ import (
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+// raftLog: Raft中日志同步的核心就是集群中leader如何同步日志到各个follower。日志的管理是在raftLog结构上完成的。
 type raftLog struct {
 	// storage contains all stable entries since the last snapshot.
+	// 用于保存自从最后一次snapshot之后提交的数据
 	storage Storage
 
 	// unstable contains all unstable entries and snapshot.
 	// they will be saved into storage.
+	// 用于保存还没有持久化的数据和快照，这些数据最终都会保存到storage中
 	unstable unstable
 
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
+	// 当天提交的日志数据索引
 	committed uint64
 	// applied is the highest log position that the application has
 	// been instructed to apply to its state machine.
 	// Invariant: applied <= committed
+	// committed保存是写入持久化存储中的最高index，而applied保存的是传入状态机中的最高index
+	// 即一条日志首先要提交成功（即committed），才能被applied到状态机中
+	// 因此以下不等式一直成立：applied <= committed
 	applied uint64
 
 	logger Logger
 
 	// maxNextEntsSize is the maximum number aggregate byte size of the messages
 	// returned from calls to nextEnts.
+	// 调用 nextEnts 时，返回的日志项集合的最大的大小
+	// nextEnts 函数返回应用程序已经可以应用到状态机的日志项集合
 	maxNextEntsSize uint64
 }
 

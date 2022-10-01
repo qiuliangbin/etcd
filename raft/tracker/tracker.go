@@ -116,11 +116,11 @@ func (c *Config) Clone() Config {
 // index for each peer which in turn allows reasoning about the committed index.
 type ProgressTracker struct {
 	Config
-
+	//  Leader 节点会记录集群中其他节点的日志复制情况(Nextlndex和Matchlndex)
 	Progress ProgressMap
-
+	//
 	Votes map[uint64]bool
-
+	// 对于当前节点来说，己经发送出去但未收到响应的消息个数上限
 	MaxInflight int
 }
 
@@ -155,6 +155,7 @@ func (p *ProgressTracker) ConfState() pb.ConfState {
 
 // IsSingleton returns true if (and only if) there is only one voting member
 // (i.e. the leader) in the current configuration.
+// IsSingleton 返回 true, 当(且仅当)当前配置中只有一个投票成员(即领导者)时
 func (p *ProgressTracker) IsSingleton() bool {
 	return len(p.Voters[0]) == 1 && len(p.Voters[1]) == 0
 }
