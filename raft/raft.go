@@ -848,7 +848,7 @@ func (r *raft) hup(t CampaignType) {
 		return
 	}
 
-	// 掉线/Learner/读取快照
+	// 节点被移除出集群/Learner/读取快照
 	if !r.promotable() {
 		r.logger.Warningf("%x is unpromotable and can not campaign", r.id)
 		return
@@ -865,6 +865,7 @@ func (r *raft) hup(t CampaignType) {
 	}
 
 	r.logger.Infof("%x is starting a new election at term %d", r.id, r.Term)
+	//
 	r.campaign(t)
 }
 
@@ -1375,7 +1376,9 @@ func stepLeader(r *raft, m pb.Message) error {
 			}
 		} else {
 			oldPaused := pr.IsPaused()
+			// 更新对应的match和next值
 			if pr.MaybeUpdate(m.Index) {
+				// 切换对应Progress的状态
 				switch {
 				case pr.State == tracker.StateProbe:
 					pr.BecomeReplicate()
@@ -1395,7 +1398,7 @@ func stepLeader(r *raft, m pb.Message) error {
 					pr.Inflights.FreeLE(m.Index)
 				}
 
-				if r.maybeCommit() {
+				if r.maybeCommit() { // 检测是否有Entry记录已可以提交，并发送相应的消息
 					// committed index has progressed for the term, so it is safe
 					// to respond to pending read index requests
 					releasePendingReadIndexMessages(r)
@@ -1414,6 +1417,7 @@ func stepLeader(r *raft, m pb.Message) error {
 				for r.maybeSendAppend(m.From, false) {
 				}
 				// Transfer leadership is in progress.
+				// 当收到目标Follower节点的MsgAppResp消息并且两者的raftLog完全匹配，则发送MsgTimeoutNow消息
 				if m.From == r.leadTransferee && pr.Match == r.raftLog.lastIndex() {
 					r.logger.Infof("%x sent MsgTimeoutNow to %x after received MsgAppResp", r.id, m.From)
 					r.sendTimeoutNow(m.From)
@@ -1611,6 +1615,7 @@ func stepFollower(r *raft, m pb.Message) error {
 		// Leadership transfers never use pre-vote even if r.preVote is true; we
 		// know we are not recovering from a partition so there is no need for the
 		// extra round trip.
+		// 传递参数为campaignTransfer，直接跳过PreVote状态，当前节点进入Candidate角色
 		r.hup(campaignTransfer)
 	case pb.MsgReadIndex:
 		if r.lead == None {
