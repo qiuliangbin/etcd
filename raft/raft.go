@@ -1099,10 +1099,12 @@ type stepFunc func(r *raft, m pb.Message) error
 func stepLeader(r *raft, m pb.Message) error {
 	// These message types do not require any progress for m.From.
 	switch m.Type {
-	case pb.MsgBeat: // MsgBeat消息处理
+	case pb.MsgBeat:
+		// MsgBeat消息处理
 		r.bcastHeartbeat() // 向所有节点广播心跳包(不携带任何其他数据)
 		return nil
-	case pb.MsgCheckQuorum: // MsgCheckQuorum消息处理
+	case pb.MsgCheckQuorum:
+		// MsgCheckQuorum消息处理
 		// The leader should always see itself as active. As a precaution, handle
 		// the case in which the leader isn't in the configuration any more (for
 		// example if it just removed itself).
@@ -1125,7 +1127,8 @@ func stepLeader(r *raft, m pb.Message) error {
 			}
 		})
 		return nil
-	case pb.MsgProp: // 客户端发往到集群的写请求是通过MsgProp消息表示的
+	case pb.MsgProp:
+		// 客户端发往到集群的写请求是通过MsgProp消息表示的
 		// 检测MsgProp消息是否携带了Entry记录, 如果未携带,则输出异常日志并终止程序
 		if len(m.Entries) == 0 {
 			r.logger.Panicf("%x stepped empty MsgProp", r.id)
@@ -1481,17 +1484,22 @@ func stepLeader(r *raft, m pb.Message) error {
 			r.logger.Debugf("%x is learner. Ignored transferring leadership", r.id)
 			return nil
 		}
+		// 在MsgTransferLeader消息中, From字段记录了此次Leader节点迁移操作的目标Follower节点ID
 		leadTransferee := m.From
+		// 检测当前节点是否存在一次未处理完成的节点转移操作
 		lastLeadTransferee := r.leadTransferee
 		if lastLeadTransferee != None {
 			if lastLeadTransferee == leadTransferee {
+				// 目标节点相同，则忽略
 				r.logger.Infof("%x [term %d] transfer leadership to %x is in progress, ignores request to same node %x",
 					r.id, r.Term, leadTransferee, leadTransferee)
 				return nil
 			}
+			// 若目标节点不同,则清空上次记录的ID(即raft.leadTransferee)
 			r.abortLeaderTransfer()
 			r.logger.Infof("%x [term %d] abort previous transferring leadership to %x", r.id, r.Term, lastLeadTransferee)
 		}
+		// 目标节点已经时Leader节点，放弃此次迁移操作
 		if leadTransferee == r.id {
 			r.logger.Debugf("%x is already leader. Ignored transferring leadership to self", r.id)
 			return nil
@@ -1499,12 +1507,16 @@ func stepLeader(r *raft, m pb.Message) error {
 		// Transfer leadership to third party.
 		r.logger.Infof("%x [term %d] starts to transfer leadership to %x", r.id, r.Term, leadTransferee)
 		// Transfer leadership should be finished in one electionTimeout, so reset r.electionElapsed.
+		// 整个迁移操作应该在electionTimeout时间内完成,这里会重置选举计时器
 		r.electionElapsed = 0
+		// 记录此次迁移的目标ID
 		r.leadTransferee = leadTransferee
 		if pr.Match == r.raftLog.lastIndex() {
+			// 向目标Follower节点发送MsgTimeoutNow消息, 这回导致Follower节点的选举计时器立即过期, 并发起新一轮选举
 			r.sendTimeoutNow(leadTransferee)
 			r.logger.Infof("%x sends MsgTimeoutNow to %x immediately as %x already has up-to-date log", r.id, leadTransferee, leadTransferee)
 		} else {
+			// 如果raftLog中的Entry记录没有完全匹配, 则Leader节点通过发送MsgApp消息向目标节点进行复制
 			r.sendAppend(leadTransferee)
 		}
 	}
