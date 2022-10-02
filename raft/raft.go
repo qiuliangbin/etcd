@@ -244,9 +244,10 @@ func (c *Config) validate() error {
 type raft struct {
 	// 当前节点在集群中的ID
 	id uint64
-	// 当前任期号
+	// 当前任期号.
+	// 如果Message的Term字段为0,则表示消息时本地消息, 例如MsgHup,MsgProp,MsgReadIndex等消息,都属于本地消息
 	Term uint64
-	// 当前任期中当前节点将选票投给了哪个节点
+	// 当前任期中当前节点将选票投给了哪个节点, 未投票时,字段值为None
 	Vote uint64
 	// 与只读请求相关
 	readStates []ReadState
@@ -257,12 +258,12 @@ type raft struct {
 	maxMsgSize uint64
 	// 未提交Entry记录的最大值
 	maxUncommittedSize uint64
-	// TODO(tbg): rename to trk.
+	// Peers节点日志复制情况(NextIndex和MatchIndex)
 	prs tracker.ProgressTracker
 	// 	当前节点在集群中的角色; Follower(跟随者), Candidate(候选者), Leader(领导者), PreCandidate(准备候选者),
 	state StateType
 
-	// isLearner is true if the local raft node is a learner.
+	// 为 true 则当前 raft 节点为 learner
 	isLearner bool // 注：https://www.modb.pro/db/365678
 	// 缓存了当前节点等待发送的消息
 	msgs []pb.Message // 要发给其他节点的信息都存在这里，以后由上层channel取走
@@ -279,11 +280,15 @@ type raft struct {
 	// configuration change (if any). Config changes are only allowed to
 	// be proposed if the leader's applied index is greater than this
 	// value.
+	// 每次只能有一个conf变更是待定的（在日志中，但尚未应用）。这一点通过 pendingConfIndex 强制执行，
+	// 该值被设置为 >= 最新待定配置变更（如果有的话）的日志索引。
+	// 只有当领导者的应用索引大于此值时，才允许提出配置变更。
 	pendingConfIndex uint64
 	// an estimate of the size of the uncommitted tail of the Raft log. Used to
 	// prevent unbounded log growth. Only maintained by the leader. Reset on
 	// term changes.
 	// 未提交的最大长度
+	// 对 Raft 日志中未提交的尾部大小的估计。用来防止日志的无限制增长。仅由领导者维护。在 Term 变化时重置
 	uncommittedSize uint64
 	// 与只读请求相关
 	readOnly *readOnly
@@ -293,6 +298,7 @@ type raft struct {
 	// number of ticks since it reached last electionTimeout or received a
 	// valid message from current leader when it is a follower.
 	// 选举计时器的指针，其单位是逻辑时钟的刻度，逻辑时钟每推进一次，该字段值就会增加 1
+	// 当它是领导者或候选人时，它达到最后一次选举时间的刻度数。 当它是追随者时，它达到最后一次选举时间的刻度数或收到当前领导者的有效信息的刻度数。
 	electionElapsed int
 
 	// number of ticks since it reached last heartbeatTimeout.
@@ -341,12 +347,14 @@ func newRaft(c *Config) *raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
+	// 初始化raftLog日志复制实例
 	raftlog := newLogWithSize(c.Storage, c.Logger, c.MaxCommittedSizePerReady)
+	// 初始化当前节点处理状态(任期号,投票结果,raftLog的已提交位置)和当前集群节点状况
 	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
-
+	// 初始化raft实例
 	r := &raft{
 		id:                        c.ID,
 		lead:                      None,
@@ -379,8 +387,9 @@ func newRaft(c *Config) *raft {
 	if c.Applied > 0 {
 		raftlog.appliedTo(c.Applied)
 	}
+	// 切换成Follower状态, 重置当前节点任期号
 	r.becomeFollower(r.Term, None)
-
+	// 初始化当前集群可投票节点集合
 	var nodesStrs []string
 	for _, n := range r.prs.VoterNodes() {
 		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))

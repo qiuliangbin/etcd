@@ -56,6 +56,7 @@ type raftLog struct {
 // newLog returns log using the given storage and default options. It
 // recovers the log to the state that it just commits and applies the
 // latest snapshot.
+// 初始化raftLog日志复制实例
 func newLog(storage Storage, logger Logger) *raftLog {
 	return newLogWithSize(storage, logger, noLimit)
 }
@@ -66,11 +67,12 @@ func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raf
 	if storage == nil {
 		log.Panic("storage must not be nil")
 	}
-	log := &raftLog{
+	log := &raftLog{ // 创建raftLog实例, 并初始化storage字段
 		storage:         storage,
 		logger:          logger,
 		maxNextEntsSize: maxNextEntsSize,
 	}
+	// 获取storage中第一个和最后一个Entry的索引
 	firstIndex, err := storage.FirstIndex()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
@@ -79,9 +81,11 @@ func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raf
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
+	// 初始化unstable.offset
 	log.unstable.offset = lastIndex + 1
 	log.unstable.logger = logger
 	// Initialize our committed and applied pointers to the time of the last compaction.
+	// 初始化committed和applied字段为上一次快照的索引
 	log.committed = firstIndex - 1
 	log.applied = firstIndex - 1
 

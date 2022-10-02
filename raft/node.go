@@ -40,7 +40,7 @@ var (
 type SoftState struct {
 	// 当前集群的Leader节点ID
 	Lead uint64 // must use atomic operations to access; keep 64-bit aligned.
-	// 当前节点的角色
+	// 当前节点在集群中的角色
 	RaftState StateType
 }
 
@@ -242,21 +242,24 @@ type Peer struct {
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
 //
 // Peers must not be zero length; call RestartNode in that case.
+// StartNode Config为传入配置信息, Peers封装了节点的ID, peers记录当前集群中全部节点的ID
 func StartNode(c *Config, peers []Peer) Node {
 	if len(peers) == 0 {
 		panic("no peers given; use RestartNode instead")
 	}
+	// 创建一个RawNode实例
 	rn, err := NewRawNode(c)
 	if err != nil {
 		panic(err)
 	}
+	// 启动RawNode实例
 	err = rn.Bootstrap(peers)
 	if err != nil {
 		c.Logger.Warningf("error occurred during starting a new node: %v", err)
 	}
-
+	// 初始化node实例
 	n := newNode(rn)
-
+	// 启动一个goroutine, 其中会根据底层raft的状态及上层模块传递的数据, 协调处理node中各个通道的数据
 	go n.run()
 	return &n
 }
@@ -266,11 +269,14 @@ func StartNode(c *Config, peers []Peer) Node {
 // If the caller has an existing state machine, pass in the last log index that
 // has been applied to it; otherwise use zero.
 func RestartNode(c *Config) Node {
+	// 创建底层封装的raft实例, 该过程与StartNode()函数相同
 	rn, err := NewRawNode(c)
 	if err != nil {
 		panic(err)
 	}
+	// 创建node实例
 	n := newNode(rn)
+	// 启动一个goroutine, 其中会根据底层raft的状态及上层模块传递的数据,协调处理node中各种通道的数据
 	go n.run()
 	return &n
 }
@@ -322,7 +328,7 @@ func newNode(rn *RawNode) node {
 		// make tickc a buffered chan, so raft node can buffer some ticks when the node
 		// is busy processing raft messages. Raft node will resume process buffered
 		// ticks when it becomes idle.
-		tickc:  make(chan struct{}, 128),
+		tickc:  make(chan struct{}, 128), // 带缓冲区的channel
 		done:   make(chan struct{}),
 		stop:   make(chan struct{}),
 		status: make(chan chan Status),
