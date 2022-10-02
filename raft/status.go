@@ -25,20 +25,20 @@ import (
 // The Progress is only populated on the leader.
 type Status struct {
 	BasicStatus
-	Config   tracker.Config
-	Progress map[uint64]tracker.Progress
+	Config   tracker.Config              // 节点配置信息和唱票信息
+	Progress map[uint64]tracker.Progress // 记录集群中每个节点对应的Progress实例
 }
 
 // BasicStatus contains basic information about the Raft peer. It does not allocate.
 type BasicStatus struct {
-	ID uint64
+	ID uint64 // 当前节点的ID
 
-	pb.HardState
-	SoftState
+	pb.HardState // 当前节点的任期号&当前节点在该任期的投票结果&当前节点的raftLog的已提交位置
+	SoftState    // 当前集群的Leader节点ID & 当前节点的角色
 
-	Applied uint64
+	Applied uint64 // 已应用的Entry记录的最大索引值
 
-	LeadTransferee uint64
+	LeadTransferee uint64 // Leader节点迁移到Follower节点ID(LeadTransferee)
 }
 
 func getProgressCopy(r *raft) map[uint64]tracker.Progress {
