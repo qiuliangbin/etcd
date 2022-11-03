@@ -46,6 +46,7 @@ func (c JointConfig) Describe(l AckedIndexer) string {
 // CommittedIndex returns the largest committed index for the given joint
 // quorum. An index is jointly committed if it is committed in both constituent
 // majorities.
+// 将node分两个组，JointConfig是大多数的组，有兴趣的看一看quorum包的实现
 func (c JointConfig) CommittedIndex(l AckedIndexer) Index {
 	idx0 := c[0].CommittedIndex(l)
 	idx1 := c[1].CommittedIndex(l)

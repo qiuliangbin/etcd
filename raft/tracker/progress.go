@@ -28,6 +28,8 @@ import (
 // strewn around `*raft.raft`. Additionally, some fields are only used when in a
 // certain State. All of this isn't ideal.
 type Progress struct {
+	// Match 对应Follower节点当前己经成功复制的 Entry 记录的索引值
+	// Next 对应Follower节点下一个待复制的Entry记录的索引值
 	Match, Next uint64
 	// State defines how the leader should interact with the follower.
 	//
@@ -40,6 +42,7 @@ type Progress struct {
 	//
 	// When in StateSnapshot, leader should have sent out snapshot
 	// before and stops sending any replication message.
+	// 对应 Follower 节点的复制状态
 	State StateType
 
 	// PendingSnapshot is used in StateSnapshot.
@@ -47,18 +50,20 @@ type Progress struct {
 	// index of the snapshot. If pendingSnapshot is set, the replication process of
 	// this Progress will be paused. raft will not resend snapshot until the pending one
 	// is reported to be failed.
+	// 当前正在发送的快照数据信息
 	PendingSnapshot uint64
 
 	// RecentActive is true if the progress is recently active. Receiving any messages
 	// from the corresponding follower indicates the progress is active.
 	// RecentActive can be reset to false after an election timeout.
-	//
 	// TODO(tbg): the leader should always have this set to true.
+	// 从当前 Leader 节点的角度来看 ，该 Progress 实例对应 的 Follower 节点是否存活
 	RecentActive bool
 
 	// ProbeSent is used while this follower is in StateProbe. When ProbeSent is
 	// true, raft should pause sending replication message to this peer until
 	// ProbeSent is reset. See ProbeAcked() and IsPaused().
+	// 当前 Leader 节点是否可以向该 Progress 实例对应的 Follower 节点发送消息。
 	ProbeSent bool
 
 	// Inflights is a sliding window for the inflight messages.
@@ -143,11 +148,15 @@ func (pr *Progress) BecomeSnapshot(snapshoti uint64) {
 // an outdated message. Otherwise it updates the progress and returns true.
 func (pr *Progress) MaybeUpdate(n uint64) bool {
 	var updated bool
+	// n之前成功发送的所有Entry记录已经写入对应节点的raftLog中
 	if pr.Match < n {
 		pr.Match = n
 		updated = true
+		// Progress.ProbeSent设置为false,表示Leader节点可以继续向对应Follower节点
+		// 发送MsgApp消息(即复制Entry记录)
 		pr.ProbeAcked()
 	}
+	// 移动Next字段,下次要复制的Entry记录从Next开始
 	pr.Next = max(pr.Next, n+1)
 	return updated
 }

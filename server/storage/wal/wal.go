@@ -925,6 +925,7 @@ func (w *WAL) Save(st raftpb.HardState, ents []raftpb.Entry) error {
 	defer w.mu.Unlock()
 
 	// short cut, do not call sync
+	// 边界检查，如果待写入的HardState和Entry数组都为空，则直接返回;否则就需要将修改同步到磁盘上
 	if raft.IsEmptyHardState(st) && len(ents) == 0 {
 		return nil
 	}
@@ -932,26 +933,29 @@ func (w *WAL) Save(st raftpb.HardState, ents []raftpb.Entry) error {
 	mustSync := raft.MustSync(st, w.state, len(ents))
 
 	// TODO(xiangli): no more reference operator
+	// 遍历待写入的Entry数组，将每个Entry实例序列化并封装entryType类型的日志记录，写入日志文件
 	for i := range ents {
 		if err := w.saveEntry(&ents[i]); err != nil {
 			return err
 		}
 	}
+	// 将状态信息（HardState） 序列化并封装成stateType类型的日志记录，写入日志文件
 	if err := w.saveState(&st); err != nil {
 		return err
 	}
-
+	// 获取当前日志段文件的文件指针的位置
 	curOff, err := w.tail().Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
+	// 如未写满预分配的空间，将新日志刷新到磁盘后，即可返回
 	if curOff < SegmentSizeBytes {
 		if mustSync {
 			return w.sync()
 		}
 		return nil
 	}
-
+	// 当前文件大小已超出了预分配的空间， 则需进行日志文件的切换
 	return w.cut()
 }
 

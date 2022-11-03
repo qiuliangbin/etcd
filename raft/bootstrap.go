@@ -47,17 +47,20 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 
 	// TODO(tbg): remove StartNode and give the application the right tools to
 	// bootstrap the initial membership in a cleaner way.
+	// 切换成Follower状态,因为节点初次启动,所以任期号为1
 	rn.raft.becomeFollower(1, None)
 	ents := make([]pb.Entry, len(peers))
 	for i, peer := range peers {
+		// 根据传递的节点列表, 创建对应的ConfChange实例, 其Type是ConfChangeAddNode, 表示添加指定节点
 		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
-		data, err := cc.Marshal()
+		data, err := cc.Marshal() // 序列化ConfChange记录
 		if err != nil {
 			return err
 		}
-
+		// 将ConfChange记录序列化后的数据封装成EntryConfChange类型的Entry记录
 		ents[i] = pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: uint64(i + 1), Data: data}
 	}
+	// 将EntryConfChange记录集合追加到raftLog中
 	rn.raft.raftLog.append(ents...)
 
 	// Now apply them, mainly so that the application can call Campaign
@@ -72,7 +75,9 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	//
 	// TODO(bdarnell): These entries are still unstable; do we need to preserve
 	// the invariant that committed < unstable?
+	// 直接修改raftLog。committed值, 提交上述EntryConfChange记录
 	rn.raft.raftLog.committed = uint64(len(ents))
+	// 为节点列表中的每个节点都创建对应的Progress实例
 	for _, peer := range peers {
 		rn.raft.applyConfChange(pb.ConfChange{NodeID: peer.ID, Type: pb.ConfChangeAddNode}.AsV2())
 	}
