@@ -41,5 +41,6 @@ func main() {
 	kvs = newKVStore(<-snapshotterReady, proposeC, commitC, errorC)
 
 	// the key-value http handler will propose updates to raft
+	// 初始化一个简单的HTTP服务端来接收用户发送的HTTP请求, 也是raftexample示例与用户交互的唯一途径
 	serveHttpKVAPI(kvs, *kvport, confChangeC, errorC)
 }
