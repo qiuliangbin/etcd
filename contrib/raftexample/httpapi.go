@@ -80,7 +80,8 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.confChangeC <- cc // 将ConfChange实例写入confChangeC通道中
 		// As above, optimistic that raft will apply the conf change
 		w.WriteHeader(http.StatusNoContent) // 返回相应状态码
-	case http.MethodDelete:
+	case http.MethodDelete: // DELETE请求的处理
+		// 解析key得到的待删除的节点id, 异常处理
 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
 		if err != nil {
 			log.Printf("Failed to convert ID for conf change (%v)\n", err)
@@ -89,12 +90,13 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cc := raftpb.ConfChange{
-			Type:   raftpb.ConfChangeRemoveNode,
-			NodeID: nodeId,
+			Type:   raftpb.ConfChangeRemoveNode, //ConfChangeRemoveNode表示删除指定节点
+			NodeID: nodeId,                      // 指定待删除的节点id
 		}
-		h.confChangeC <- cc
+		h.confChangeC <- cc // 将ConfChange实例发送到confChangeC通道中
 
 		// As above, optimistic that raft will apply the conf change
+		// 与PUT请求的处理方法类似,向客户返回状态码为204的HTTP响应
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.Header().Set("Allow", http.MethodPut)
@@ -107,13 +109,15 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveHttpKVAPI starts a key-value server with a GET/PUT API and listens.
 func serveHttpKVAPI(kv *kvstore, port int, confChangeC chan<- raftpb.ConfChange, errorC <-chan error) {
-	srv := http.Server{
+	srv := http.Server{ // 创建http.Server用于接收HTTP请求
 		Addr: ":" + strconv.Itoa(port),
-		Handler: &httpKVAPI{
+		Handler: &httpKVAPI{ // 设置http.Server的Handler字段
 			store:       kv,
 			confChangeC: confChangeC,
 		},
 	}
+	// 启动单独的goroutine来监听Addr指定的地址,当有HTTP请求时,http.Server会创建对应的goroutine,
+	// 并调用httpKVAPI.ServeHTTP方法进行处理
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
 			log.Fatal(err)
