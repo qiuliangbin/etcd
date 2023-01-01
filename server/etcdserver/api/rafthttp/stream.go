@@ -115,18 +115,19 @@ type streamWriter struct {
 	lg *zap.Logger
 
 	localID types.ID
-	peerID  types.ID
+	peerID  types.ID // 对端节点的ID
 
 	status *peerStatus
 	fs     *stats.FollowerStats
-	r      Raft
+	r      Raft // 底层的Raft实例
 
 	mu      sync.Mutex // guard field working and closer
-	closer  io.Closer
-	working bool
+	closer  io.Closer  // 负责关闭底层的长连接
+	working bool       // 负责标识当前的streamWriter是否可用(底层是否关联相应的网络连接)
 
-	msgc  chan raftpb.Message
-	connc chan *outgoingConn
+	msgc  chan raftpb.Message // Peer接口会将待发送的消息写入msgc通道,streamWriter则从通道中读取消息并发送出去
+	connc chan *outgoingConn  // 通过该通道获取当前 treamWriter 实例关联的底层网络连接， outgoingConn 其实是对网络连接的一层封装，
+	//其中记录了 当前连接使用的协议版本，以及用于关闭连接的Flusher和Closer等信息
 	stopc chan struct{}
 	done  chan struct{}
 }

@@ -733,6 +733,11 @@ type etcdProgress struct {
 // raftReadyHandler contains a set of EtcdServer operations to be called by raftNode,
 // and helps decouple state machine logic from Raft algorithms.
 // TODO: add a state machine interface to toApply the commit entries and do snapshot/recover
+// raftReadyHandler 的功能：在结构体 EtcdSe er 中记录了当前节点的状态信息，
+// 例如，当前是否是Leader节点、Entry记录的提交位置(cornmittedlndex字段)等。
+// 在raftNode.start()方法处理Ready实例的过程中, 会涉及这些信息的修改, raftReadyHandler中封装了
+// updateLeadership和updateCornmittedIndex两个回调函数,这样就可以在raftNode中通过这两个回调函数，
+// 修改 tcdServer 中的相应字段了。
 type raftReadyHandler struct {
 	getLead              func() (lead uint64)
 	updateLead           func(lead uint64)

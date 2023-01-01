@@ -50,20 +50,21 @@ func (td *TimeoutDetector) Reset() {
 
 // Observe observes an event for given id. It returns false and exceeded duration
 // if the interval is longer than the expectation.
+// Observe 检测两次发送心跳消息的时间间隔，records这个map中记录了上一次向目标节点发送心跳消息的时间(key是节点ID,value是具体时间)。
 func (td *TimeoutDetector) Observe(which uint64) (bool, time.Duration) {
 	td.mu.Lock()
 	defer td.mu.Unlock()
 
 	ok := true
-	now := time.Now()
+	now := time.Now() // 记录当前时间
 	exceed := time.Duration(0)
-
+	// 从records中获取上次向目标节点发送心跳消息的时间
 	if pt, found := td.records[which]; found {
-		exceed = now.Sub(pt) - td.maxDuration
+		exceed = now.Sub(pt) - td.maxDuration // 计算两次心跳消息的时间间隔
 		if exceed > 0 {
 			ok = false
 		}
 	}
-	td.records[which] = now
+	td.records[which] = now // 更新records中的对应记录
 	return ok, exceed
 }
